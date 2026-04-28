@@ -33,7 +33,11 @@ function dataUrlToBuffer(dataUrl: string) {
 }
 
 export async function POST(req: NextRequest) {
+  try {
   const { storyboard } = Body.parse(await req.json());
+  if (!process.env.GOOGLE_REFRESH_TOKEN) {
+    return NextResponse.json({ error: "GOOGLE_REFRESH_TOKEN not set" }, { status: 500 });
+  }
   const auth = authedClient();
   const drive = google.drive({ version: "v3", auth });
   const sheets = google.sheets({ version: "v4", auth });
@@ -139,8 +143,13 @@ export async function POST(req: NextRequest) {
     requestBody: { role: "reader", type: "anyone" },
   });
 
-  return NextResponse.json({
-    spreadsheetId,
-    url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
-  });
+    return NextResponse.json({
+      spreadsheetId,
+      url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
+    });
+  } catch (e: any) {
+    console.error("sheet error:", e?.response?.data ?? e);
+    const detail = e?.response?.data?.error?.message ?? e?.message ?? String(e);
+    return NextResponse.json({ error: detail }, { status: 500 });
+  }
 }

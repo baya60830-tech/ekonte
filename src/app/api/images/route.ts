@@ -32,7 +32,8 @@ export async function POST(req: NextRequest) {
         if (!img) return { error: "no image returned" };
         return { dataUrl: `data:${img.mimeType};base64,${img.data}` };
       } catch (e: any) {
-        return { error: e?.message ?? "generation failed" };
+        console.error("image gen error:", e);
+        return { error: e?.message ?? String(e) ?? "generation failed" };
       }
     })
   );

@@ -51,10 +51,13 @@ export default function Page() {
       if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()) || "(空のレスポンス)"}`);
       const { results } = (await r.json()) as { results: { dataUrl?: string; error?: string }[] };
       const next = { ...sb, cuts: sb.cuts.slice() };
+      const errs: string[] = [];
       targets.forEach((i, k) => {
         if (results[k].dataUrl) next.cuts[i] = { ...next.cuts[i], imageDataUrl: results[k].dataUrl };
+        else if (results[k].error) errs.push(`カット${sb.cuts[i].no}: ${results[k].error}`);
       });
       setSb(next);
+      if (errs.length) alert("画像生成エラー:\n" + errs.join("\n"));
     } catch (e: any) {
       alert(e.message);
     } finally {
@@ -71,8 +74,13 @@ export default function Page() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ storyboard: sb }),
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()) || "(空のレスポンス)"}`);
-      const { url } = await r.json();
+      const text = await r.text();
+      if (!r.ok) {
+        let msg = text || "(空のレスポンス)";
+        try { msg = JSON.parse(text).error ?? msg; } catch {}
+        throw new Error(`HTTP ${r.status}: ${msg}`);
+      }
+      const { url } = JSON.parse(text);
       setSheetUrl(url);
       window.open(url, "_blank");
     } catch (e: any) {
