@@ -25,7 +25,7 @@ export default function Page() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ brief, totalSeconds, ...(cutCount === "" ? {} : { cutCount }) }),
       });
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()) || "(空のレスポンス)"}`);
       setSb(await r.json());
     } catch (e: any) {
       alert(e.message);
@@ -48,7 +48,7 @@ export default function Page() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ prompts, style }),
       });
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()) || "(空のレスポンス)"}`);
       const { results } = (await r.json()) as { results: { dataUrl?: string; error?: string }[] };
       const next = { ...sb, cuts: sb.cuts.slice() };
       targets.forEach((i, k) => {
@@ -71,7 +71,7 @@ export default function Page() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ storyboard: sb }),
       });
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()) || "(空のレスポンス)"}`);
       const { url } = await r.json();
       setSheetUrl(url);
       window.open(url, "_blank");
