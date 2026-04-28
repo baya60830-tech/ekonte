@@ -37,29 +37,41 @@ export default function Page() {
   async function generateImages(indexes?: number[]) {
     if (!sb) return;
     const targets = indexes ?? sb.cuts.map((_, i) => i);
-    setBusy(`画像を生成中… (${targets.length}枚)`);
+    const errs: string[] = [];
     try {
-      const prompts = targets.map((i) => {
+      // 1枚ずつリクエスト（Vercel 4.5MB レスポンス上限回避）
+      for (let k = 0; k < targets.length; k++) {
+        const i = targets[k];
+        setBusy(`画像を生成中… (${k + 1}/${targets.length})`);
         const c = sb.cuts[i];
-        return [c.image, c.shot, c.camera].filter(Boolean).join(" / ");
-      });
-      const r = await fetch("/api/images", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompts, style }),
-      });
-      if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()) || "(空のレスポンス)"}`);
-      const { results } = (await r.json()) as { results: { dataUrl?: string; error?: string }[] };
-      const next = { ...sb, cuts: sb.cuts.slice() };
-      const errs: string[] = [];
-      targets.forEach((i, k) => {
-        if (results[k].dataUrl) next.cuts[i] = { ...next.cuts[i], imageDataUrl: results[k].dataUrl };
-        else if (results[k].error) errs.push(`カット${sb.cuts[i].no}: ${results[k].error}`);
-      });
-      setSb(next);
+        const prompt = [c.image, c.shot, c.camera].filter(Boolean).join(" / ");
+        try {
+          const r = await fetch("/api/images", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ prompts: [prompt], style }),
+          });
+          if (!r.ok) {
+            errs.push(`カット${c.no}: HTTP ${r.status}: ${(await r.text()) || "(空)"}`);
+            continue;
+          }
+          const { results } = (await r.json()) as { results: { dataUrl?: string; error?: string }[] };
+          const res = results[0];
+          if (res?.dataUrl) {
+            setSb((prev) => {
+              if (!prev) return prev;
+              const cuts = prev.cuts.slice();
+              cuts[i] = { ...cuts[i], imageDataUrl: res.dataUrl };
+              return { ...prev, cuts };
+            });
+          } else if (res?.error) {
+            errs.push(`カット${c.no}: ${res.error}`);
+          }
+        } catch (e: any) {
+          errs.push(`カット${c.no}: ${e.message}`);
+        }
+      }
       if (errs.length) alert("画像生成エラー:\n" + errs.join("\n"));
-    } catch (e: any) {
-      alert(e.message);
     } finally {
       setBusy("");
     }
