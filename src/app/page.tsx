@@ -69,10 +69,12 @@ export default function Page() {
     if (!sb) return;
     setBusy("Googleスプシに出力中…");
     try {
+      // 1) スプシ作成（画像なし）
+      const sbNoImg = { ...sb, cuts: sb.cuts.map(({ imageDataUrl: _omit, ...rest }) => rest) };
       const r = await fetch("/api/sheet", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ storyboard: sb }),
+        body: JSON.stringify({ storyboard: sbNoImg }),
       });
       const text = await r.text();
       if (!r.ok) {
@@ -80,9 +82,39 @@ export default function Page() {
         try { msg = JSON.parse(text).error ?? msg; } catch {}
         throw new Error(`HTTP ${r.status}: ${msg}`);
       }
-      const { url } = JSON.parse(text);
+      const { spreadsheetId, url } = JSON.parse(text);
+
+      // 2) 画像を1枚ずつアップロード
+      const imgErrs: string[] = [];
+      for (let i = 0; i < sb.cuts.length; i++) {
+        const cut = sb.cuts[i];
+        if (!cut.imageDataUrl) continue;
+        setBusy(`画像をスプシに反映中… (${i + 1}/${sb.cuts.length})`);
+        try {
+          const ir = await fetch("/api/sheet/image", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              spreadsheetId,
+              rowIndex: i,
+              cutNo: cut.no,
+              dataUrl: cut.imageDataUrl,
+            }),
+          });
+          if (!ir.ok) {
+            const t = await ir.text();
+            let m = t;
+            try { m = JSON.parse(t).error ?? t; } catch {}
+            imgErrs.push(`カット${cut.no}: ${m}`);
+          }
+        } catch (e: any) {
+          imgErrs.push(`カット${cut.no}: ${e.message}`);
+        }
+      }
+
       setSheetUrl(url);
       window.open(url, "_blank");
+      if (imgErrs.length) alert("一部の画像反映に失敗:\n" + imgErrs.join("\n"));
     } catch (e: any) {
       alert(e.message);
     } finally {

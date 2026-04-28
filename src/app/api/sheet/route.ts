@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { google } from "googleapis";
-import { Readable } from "node:stream";
 import { z } from "zod";
 import { authedClient } from "@/lib/google";
 import type { Storyboard } from "@/lib/types";
@@ -26,12 +25,6 @@ const HEADERS = [
   "訴求ポイント",
 ];
 
-function dataUrlToBuffer(dataUrl: string) {
-  const m = dataUrl.match(/^data:(.+?);base64,(.+)$/);
-  if (!m) throw new Error("invalid data url");
-  return { mime: m[1], buf: Buffer.from(m[2], "base64") };
-}
-
 export async function POST(req: NextRequest) {
   try {
   const { storyboard } = Body.parse(await req.json());
@@ -52,28 +45,12 @@ export async function POST(req: NextRequest) {
   const spreadsheetId = created.data.spreadsheetId!;
   const sheetId = created.data.sheets![0].properties!.sheetId!;
 
-  // 2) 画像を Drive に公開アップロード
-  const imageUrls: (string | null)[] = await Promise.all(
-    storyboard.cuts.map(async (c) => {
-      if (!c.imageDataUrl) return null;
-      const { mime, buf } = dataUrlToBuffer(c.imageDataUrl);
-      const file = await drive.files.create({
-        requestBody: { name: `cut_${String(c.no).padStart(3, "0")}.png`, mimeType: mime },
-        media: { mimeType: mime, body: Readable.from(buf) },
-        fields: "id",
-      });
-      const id = file.data.id!;
-      await drive.permissions.create({ fileId: id, requestBody: { role: "reader", type: "anyone" } });
-      return `https://drive.google.com/uc?export=view&id=${id}`;
-    })
-  );
-
-  // 3) 行データ書き込み（B列はIMAGE関数）
+  // 2) 行データ書き込み（画像列は空。後段の /api/sheet/image で埋める）
   const values: (string | number)[][] = [HEADERS];
-  storyboard.cuts.forEach((c, i) => {
+  storyboard.cuts.forEach((c) => {
     values.push([
       c.no,
-      imageUrls[i] ? `=IMAGE("${imageUrls[i]}",4,180,320)` : "",
+      "",
       c.seconds,
       c.cumulative ?? "",
       c.scene,
@@ -145,6 +122,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       spreadsheetId,
+      sheetId,
       url: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`,
     });
   } catch (e: any) {
