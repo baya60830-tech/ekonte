@@ -10,7 +10,10 @@ export type Cut = {
   narration: string;      // I列: ナレーション
   bgm: string;            // J列: BGM・効果音
   appeal: string;         // K列: 訴求ポイント
-  imageDataUrl?: string;  // 生成画像 (data URL)
+  imageDataUrl?: string;  // 現在表示中の画像 (data URL)
+  imageSource?: "ai" | "upload"; // 出所
+  aiImageDataUrl?: string;       // 直近のAI生成画像（履歴）
+  uploadImageDataUrl?: string;   // 直近のアップロード画像（履歴）
 };
 
 export type Storyboard = {

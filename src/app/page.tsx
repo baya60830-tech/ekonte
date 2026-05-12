@@ -19,6 +19,7 @@ export default function Page() {
   );
   const [totalSeconds, setTotalSeconds] = useState(60);
   const [cutCount, setCutCount] = useState<number | "">(""); // 空ならAIが自動決定
+  const [subjectHint, setSubjectHint] = useState(""); // 主役の属性（性別・年代・服装等）
   const [style, setStyle] = useState<Style>("photo");
   const [sb, setSb] = useState<Storyboard | null>(null);
   const [busy, setBusy] = useState<string>("");
@@ -30,10 +31,21 @@ export default function Page() {
     setBusy("構成を生成中…");
     setSheetUrl("");
     try {
+      const hint = subjectHint.trim();
+      // 軽い確認: briefに性別関連の語があり、subjectHintが空なら一度だけ確認
+      if (!hint && /(女性|男性|女子|男子|女の子|男の子|ママ|父|母|レディ)/.test(brief)) {
+        const ok = confirm("企画概要に性別の語がありますが、「主役の属性」が空欄です。\n\nこのまま生成しますか？（OKで続行 / キャンセルして属性を入力）");
+        if (!ok) { setBusy(""); return; }
+      }
       const r = await fetch("/api/storyboard", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ brief, totalSeconds, ...(cutCount === "" ? {} : { cutCount }) }),
+        body: JSON.stringify({
+          brief,
+          totalSeconds,
+          ...(cutCount === "" ? {} : { cutCount }),
+          ...(hint ? { subjectHint: hint } : {}),
+        }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()) || "(空のレスポンス)"}`);
       setSb(await r.json());
@@ -56,10 +68,11 @@ export default function Page() {
         const c = sb.cuts[i];
         const prompt = [c.image, c.shot, c.camera].filter(Boolean).join(" / ");
         try {
+          const hint = subjectHint.trim();
           const r = await fetch("/api/images", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ prompts: [prompt], style }),
+            body: JSON.stringify({ prompts: [prompt], style, ...(hint ? { subjectHint: hint } : {}) }),
           });
           if (!r.ok) {
             errs.push(`カット${c.no}: HTTP ${r.status}: ${(await r.text()) || "(空)"}`);
@@ -71,7 +84,12 @@ export default function Page() {
             setSb((prev) => {
               if (!prev) return prev;
               const cuts = prev.cuts.slice();
-              cuts[i] = { ...cuts[i], imageDataUrl: res.dataUrl };
+              cuts[i] = {
+                ...cuts[i],
+                imageDataUrl: res.dataUrl,
+                imageSource: "ai",
+                aiImageDataUrl: res.dataUrl,
+              };
               return { ...prev, cuts };
             });
           } else if (res?.error) {
@@ -232,7 +250,12 @@ export default function Page() {
         if (idx < 0) return;
         const img = pool.find((p) => p.id === a.thumbnailId);
         if (!img) return;
-        next.cuts[idx] = { ...next.cuts[idx], imageDataUrl: img.originalDataUrl };
+        next.cuts[idx] = {
+          ...next.cuts[idx],
+          imageDataUrl: img.originalDataUrl,
+          imageSource: "upload",
+          uploadImageDataUrl: img.originalDataUrl,
+        };
         newInfo[cutNo] = { reason: a.reason, confidence: a.confidence };
         usedThumbnails.add(a.thumbnailId);
       });
@@ -251,9 +274,24 @@ export default function Page() {
     const img = pool.find((p) => p.id === thumbnailId);
     if (!img) return;
     const cuts = sb.cuts.slice();
-    cuts[cutIndex] = { ...cuts[cutIndex], imageDataUrl: img.originalDataUrl };
+    cuts[cutIndex] = {
+      ...cuts[cutIndex],
+      imageDataUrl: img.originalDataUrl,
+      imageSource: "upload",
+      uploadImageDataUrl: img.originalDataUrl,
+    };
     setSb({ ...sb, cuts });
     setPool((prev) => prev.filter((p) => p.id !== thumbnailId));
+  }
+
+  function revertSource(cutIndex: number, to: "ai" | "upload") {
+    if (!sb) return;
+    const c = sb.cuts[cutIndex];
+    const target = to === "ai" ? c.aiImageDataUrl : c.uploadImageDataUrl;
+    if (!target) return;
+    const cuts = sb.cuts.slice();
+    cuts[cutIndex] = { ...c, imageDataUrl: target, imageSource: to };
+    setSb({ ...sb, cuts });
   }
 
   return (
@@ -267,6 +305,18 @@ export default function Page() {
             className="mt-1 w-full border rounded-lg p-2 min-h-[100px]"
             value={brief}
             onChange={(e) => setBrief(e.target.value)}
+          />
+        </label>
+        <label className="block">
+          <span className="text-sm font-medium">
+            主役の属性 <span className="text-xs text-neutral-500">(任意・性別/年代/服装/雰囲気など。AI画像生成の精度向上に使う)</span>
+          </span>
+          <input
+            type="text"
+            className="mt-1 w-full border rounded-lg p-2"
+            placeholder="例: 30代女性、保育士、紺のエプロン、穏やかな笑顔"
+            value={subjectHint}
+            onChange={(e) => setSubjectHint(e.target.value)}
           />
         </label>
         <div className="flex gap-4 items-end flex-wrap">
@@ -390,6 +440,21 @@ export default function Page() {
             </a>
           )}
 
+          {/* 凡例 */}
+          <div className="flex items-center gap-3 text-xs text-neutral-700 bg-neutral-50 border rounded p-2" aria-label="画像ソースの凡例">
+            <span className="font-semibold">凡例:</span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block w-4 h-4 border-4 border-violet-500 rounded-sm bg-white" aria-hidden="true" />
+              <span className="bg-violet-500 text-white px-1 py-0.5 rounded">🤖 AI</span>
+              <span>= AI生成画像</span>
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block w-4 h-4 border-4 border-sky-500 rounded-sm bg-white" aria-hidden="true" />
+              <span className="bg-sky-500 text-white px-1 py-0.5 rounded">📷 実写</span>
+              <span>= 撮影素材</span>
+            </span>
+          </div>
+
           <div className="overflow-x-auto">
             <table className="w-full text-sm border-collapse">
               <thead className="bg-neutral-100">
@@ -405,7 +470,57 @@ export default function Page() {
                     <td className="border p-2">{c.no}</td>
                     <td className="border p-2 w-64">
                       {c.imageDataUrl ? (
-                        <img src={c.imageDataUrl} className="w-full rounded" alt="" />
+                        <div className="relative">
+                          <img
+                            src={c.imageDataUrl}
+                            className={
+                              "w-full rounded border-4 " +
+                              (c.imageSource === "upload"
+                                ? "border-sky-500"
+                                : c.imageSource === "ai"
+                                ? "border-violet-500"
+                                : "border-transparent")
+                            }
+                            alt={c.imageSource === "upload" ? "撮影素材" : c.imageSource === "ai" ? "AI生成画像" : "画像"}
+                          />
+                          {c.imageSource && (
+                            <span
+                              role="status"
+                              aria-label={c.imageSource === "upload" ? "撮影素材" : "AI生成"}
+                              className={
+                                "absolute top-1 left-1 text-xs font-bold px-1.5 py-0.5 rounded shadow " +
+                                (c.imageSource === "upload"
+                                  ? "bg-sky-500 text-white"
+                                  : "bg-violet-500 text-white")
+                              }
+                            >
+                              {c.imageSource === "upload" ? "📷 実写" : "🤖 AI"}
+                            </span>
+                          )}
+                          {/* 履歴切替ボタン */}
+                          {(c.aiImageDataUrl && c.imageSource !== "ai") || (c.uploadImageDataUrl && c.imageSource !== "upload") ? (
+                            <div className="absolute bottom-1 right-1 flex gap-1">
+                              {c.aiImageDataUrl && c.imageSource !== "ai" && (
+                                <button
+                                  onClick={() => revertSource(i, "ai")}
+                                  className="text-[10px] bg-violet-500/90 text-white rounded px-1.5 py-0.5"
+                                  title="AI生成画像に戻す"
+                                >
+                                  🤖に戻す
+                                </button>
+                              )}
+                              {c.uploadImageDataUrl && c.imageSource !== "upload" && (
+                                <button
+                                  onClick={() => revertSource(i, "upload")}
+                                  className="text-[10px] bg-sky-500/90 text-white rounded px-1.5 py-0.5"
+                                  title="撮影素材に戻す"
+                                >
+                                  📷に戻す
+                                </button>
+                              )}
+                            </div>
+                          ) : null}
+                        </div>
                       ) : (
                         <span className="text-neutral-400">未生成</span>
                       )}
