@@ -58,13 +58,26 @@ export default function Page() {
 
   async function generateImages(indexes?: number[]) {
     if (!sb) return;
-    const targets = indexes ?? sb.cuts.map((_, i) => i);
+    // 引数なし=一括 → 実写ありのカットはスキップ（上書き保護）
+    // 引数あり=個別「再生成」 → 強制実行
+    const isBulk = indexes === undefined;
+    const candidate = indexes ?? sb.cuts.map((_, i) => i);
+    const targets = isBulk
+      ? candidate.filter((i) => sb.cuts[i].imageSource !== "upload")
+      : candidate;
+    const skipped = candidate.length - targets.length;
+    if (targets.length === 0) {
+      alert(skipped > 0
+        ? `全カットに実写が割り当てられているのでAI生成はスキップしました。\n個別の「再生成」ボタンで強制AI生成できます。`
+        : "対象カットがありません。");
+      return;
+    }
     const errs: string[] = [];
     try {
       // 1枚ずつリクエスト（Vercel 4.5MB レスポンス上限回避）
       for (let k = 0; k < targets.length; k++) {
         const i = targets[k];
-        setBusy(`画像を生成中… (${k + 1}/${targets.length})`);
+        setBusy(`画像を生成中… (${k + 1}/${targets.length}${skipped > 0 ? `, 実写スキップ${skipped}件` : ""})`);
         const c = sb.cuts[i];
         const prompt = [c.image, c.shot, c.camera].filter(Boolean).join(" / ");
         try {
@@ -109,8 +122,11 @@ export default function Page() {
     if (!sb) return;
     setBusy("Googleスプシに出力中…");
     try {
-      // 1) スプシ作成（画像なし）
-      const sbNoImg = { ...sb, cuts: sb.cuts.map(({ imageDataUrl: _omit, ...rest }) => rest) };
+      // 1) スプシ作成（画像系フィールドはすべて剥がしてテキストだけ送る）
+      const sbNoImg = {
+        ...sb,
+        cuts: sb.cuts.map(({ imageDataUrl: _a, aiImageDataUrl: _b, uploadImageDataUrl: _c, ...rest }) => rest),
+      };
       const r = await fetch("/api/sheet", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -295,7 +311,7 @@ export default function Page() {
   }
 
   return (
-    <main className="mx-auto max-w-7xl p-6 space-y-6">
+    <main className="mx-auto max-w-[1600px] p-6 space-y-6">
       <h1 className="text-2xl font-bold">絵コンテ自動生成</h1>
 
       <section className="bg-white border rounded-xl p-5 space-y-4">
@@ -468,7 +484,7 @@ export default function Page() {
                 {sb.cuts.map((c, i) => (
                   <tr key={c.no} className="align-top">
                     <td className="border p-2">{c.no}</td>
-                    <td className="border p-2 w-64">
+                    <td className="border p-2 w-[500px]">
                       {c.imageDataUrl ? (
                         <div className="relative">
                           <img
@@ -559,7 +575,7 @@ export default function Page() {
                     {(["scene", "shot", "camera", "telop", "narration", "bgm", "appeal"] as const).map((k) => (
                       <td key={k} className="border p-2">
                         <textarea
-                          className="w-40 border rounded p-1 text-xs"
+                          className="w-48 border rounded p-1 text-xs min-h-[80px]"
                           value={(c as any)[k] ?? ""}
                           onChange={(e) => updateCut(i, k, e.target.value)}
                         />
