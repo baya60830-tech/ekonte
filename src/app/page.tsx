@@ -1,10 +1,73 @@
 "use client";
 
-import { useState } from "react";
-import type { Storyboard } from "@/lib/types";
+import { useEffect, useRef, useState } from "react";
+import type { Storyboard, Cut } from "@/lib/types";
 import { fileToOriginalDataUrl, makeThumbnail } from "@/lib/image-utils";
 
+// 自動高さ調整 textarea
+function AutoTextarea({
+  value,
+  onChange,
+  className,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  className?: string;
+  placeholder?: string;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.max(el.scrollHeight, 60) + "px";
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      className={className}
+      value={value}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      rows={2}
+    />
+  );
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  fullWidth = false,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  fullWidth?: boolean;
+}) {
+  return (
+    <label className={"block " + (fullWidth ? "col-span-2" : "")}>
+      <span className="text-xs font-medium text-neutral-600">{label}</span>
+      <AutoTextarea
+        className="w-full text-sm border rounded p-2 mt-1"
+        value={value ?? ""}
+        onChange={onChange}
+      />
+    </label>
+  );
+}
+
+function recomputeCumulative(cuts: Cut[]): Cut[] {
+  let acc = 0;
+  return cuts.map((c) => {
+    acc += Number(c.seconds) || 0;
+    return { ...c, cumulative: acc };
+  });
+}
+
 type Style = "photo" | "anime" | "rough";
+type Mode = "ai" | "import";
 
 type UploadedImage = {
   id: string;
@@ -26,6 +89,63 @@ export default function Page() {
   const [sheetUrl, setSheetUrl] = useState<string>("");
   const [pool, setPool] = useState<UploadedImage[]>([]);
   const [matchInfo, setMatchInfo] = useState<Record<number, { reason: string; confidence: number }>>({});
+  const [mode, setMode] = useState<Mode>("ai");
+  const [importUrl, setImportUrl] = useState("");
+  const [importInfo, setImportInfo] = useState<{ headers: string[]; mapping: Record<string, number>; usedFallback: boolean } | null>(null);
+
+  async function importFromSheet() {
+    if (!importUrl.trim()) return;
+    setBusy("スプシを読込中…");
+    setImportInfo(null);
+    try {
+      const r = await fetch("/api/sheet/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: importUrl.trim() }),
+      });
+      const text = await r.text();
+      if (!r.ok) {
+        let msg = text || "(空のレスポンス)";
+        try { msg = JSON.parse(text).error ?? msg; } catch {}
+        throw new Error(`HTTP ${r.status}: ${msg}`);
+      }
+      const data = JSON.parse(text);
+      const raw = data?.storyboard;
+      if (!raw || !Array.isArray(raw.cuts) || raw.cuts.length === 0) {
+        throw new Error("取り込んだデータにカットが見つかりません。");
+      }
+      // 各カットを安全にCutへ正規化
+      const safeCuts: Cut[] = raw.cuts.map((c: any, idx: number) => {
+        const seconds = Number(c?.seconds);
+        return {
+          no: Number.isFinite(Number(c?.no)) ? Number(c.no) : idx + 1,
+          image: String(c?.image ?? ""),
+          seconds: Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 5,
+          scene: String(c?.scene ?? ""),
+          shot: String(c?.shot ?? ""),
+          camera: String(c?.camera ?? ""),
+          telop: String(c?.telop ?? ""),
+          narration: String(c?.narration ?? ""),
+          bgm: String(c?.bgm ?? ""),
+          appeal: String(c?.appeal ?? ""),
+        };
+      });
+      const cuts = recomputeCumulative(safeCuts);
+      const totalSeconds = cuts[cuts.length - 1]?.cumulative ?? 0;
+      setSb({
+        title: typeof raw.title === "string" && raw.title ? raw.title : "インポートした絵コンテ",
+        totalSeconds,
+        cuts,
+      });
+      setMatchInfo({});
+      setImportInfo({ headers: data.headers ?? [], mapping: data.mapping ?? {}, usedFallback: !!data.usedFallback });
+      setSheetUrl("");
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setBusy("");
+    }
+  }
 
   async function generateStoryboard() {
     setBusy("構成を生成中…");
@@ -182,7 +302,43 @@ export default function Page() {
     if (!sb) return;
     const cuts = sb.cuts.slice();
     (cuts[i] as any)[key] = v;
-    setSb({ ...sb, cuts });
+    // 秒が変わったら累計を再計算
+    const nextCuts = key === "seconds" ? recomputeCumulative(cuts) : cuts;
+    setSb({ ...sb, cuts: nextCuts });
+  }
+
+  function removeCut(i: number) {
+    if (!sb) return;
+    if (!confirm(`カット${sb.cuts[i].no}を削除しますか？`)) return;
+    // 削除＆採番した新カット配列と、新旧カット番号の対応で matchInfo を再構築
+    const remainingOldNos = sb.cuts.filter((_, idx) => idx !== i).map((c) => c.no);
+    const cuts = sb.cuts.filter((_, idx) => idx !== i).map((c, idx) => ({ ...c, no: idx + 1 }));
+    setSb({ ...sb, cuts: recomputeCumulative(cuts) });
+    setMatchInfo((prev) => {
+      const next: typeof prev = {};
+      remainingOldNos.forEach((oldNo, idx) => {
+        if (prev[oldNo]) next[idx + 1] = prev[oldNo];
+      });
+      return next;
+    });
+  }
+
+  function addCut() {
+    if (!sb) return;
+    const nextNo = sb.cuts.length + 1;
+    const newCut: Cut = {
+      no: nextNo,
+      image: "",
+      seconds: 5,
+      scene: "",
+      shot: "",
+      camera: "",
+      telop: "",
+      narration: "",
+      bgm: "",
+      appeal: "",
+    };
+    setSb({ ...sb, cuts: recomputeCumulative([...sb.cuts, newCut]) });
   }
 
   async function handleUpload(files: FileList | null) {
@@ -314,6 +470,90 @@ export default function Page() {
     <main className="mx-auto max-w-[1600px] p-6 space-y-6">
       <h1 className="text-2xl font-bold">絵コンテ自動生成</h1>
 
+      {/* 入口モード切替 */}
+      <div className="flex gap-2" role="tablist">
+        <button
+          role="tab"
+          aria-selected={mode === "ai"}
+          onClick={() => setMode("ai")}
+          className={
+            "px-4 py-2 rounded-t-lg font-medium border-b-2 " +
+            (mode === "ai"
+              ? "bg-white border-black"
+              : "bg-neutral-100 text-neutral-500 border-transparent hover:bg-neutral-200")
+          }
+        >
+          📝 ゼロからAIで作る
+        </button>
+        <button
+          role="tab"
+          aria-selected={mode === "import"}
+          onClick={() => setMode("import")}
+          className={
+            "px-4 py-2 rounded-t-lg font-medium border-b-2 " +
+            (mode === "import"
+              ? "bg-white border-black"
+              : "bg-neutral-100 text-neutral-500 border-transparent hover:bg-neutral-200")
+          }
+        >
+          📋 既存スプシから取り込む
+        </button>
+      </div>
+
+      {mode === "import" && (
+        <section className="bg-white border rounded-xl p-5 space-y-3">
+          <label className="block">
+            <span className="text-sm font-medium">
+              Google Sheets URL
+              <span className="text-xs text-neutral-500 ml-2">
+                （他人のシートを取り込む場合は「リンクを知っている全員（閲覧）」共有にしてください）
+              </span>
+            </span>
+            <div className="mt-1 flex gap-2">
+              <input
+                type="url"
+                placeholder="https://docs.google.com/spreadsheets/d/..."
+                className="flex-1 border rounded-lg p-2"
+                value={importUrl}
+                onChange={(e) => setImportUrl(e.target.value)}
+              />
+              <button
+                disabled={!!busy || !importUrl.trim()}
+                onClick={importFromSheet}
+                className="bg-black text-white rounded-lg px-4 py-2 disabled:opacity-50"
+              >
+                取り込む
+              </button>
+            </div>
+          </label>
+          {importInfo && (
+            <div className="text-xs text-neutral-600 bg-neutral-50 border rounded p-2">
+              <div>
+                認識した列: {importInfo.headers.length}列 / マッピング済み:{" "}
+                {Object.keys(importInfo.mapping).length}項目
+                {importInfo.usedFallback && (
+                  <span className="ml-2 text-amber-700">（公開リンク経由で読込）</span>
+                )}
+              </div>
+              <details className="mt-1">
+                <summary className="cursor-pointer">マッピング詳細</summary>
+                <table className="mt-1 text-[11px]">
+                  <tbody>
+                    {Object.entries(importInfo.mapping).map(([k, idx]) => (
+                      <tr key={k}>
+                        <td className="pr-2 font-mono">{k}</td>
+                        <td>← 列{idx + 1}: {importInfo.headers[idx]}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </details>
+            </div>
+          )}
+        </section>
+      )}
+
+      {mode === "ai" && (
       <section className="bg-white border rounded-xl p-5 space-y-4">
         <label className="block">
           <span className="text-sm font-medium">企画概要</span>
@@ -376,6 +616,7 @@ export default function Page() {
           </button>
         </div>
       </section>
+      )}
 
       {busy && <div className="text-sm text-blue-700">{busy}</div>}
 
@@ -471,129 +712,162 @@ export default function Page() {
             </span>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm border-collapse">
-              <thead className="bg-neutral-100">
-                <tr>
-                  {["No", "イメージ", "秒", "累計", "シーン", "映像", "構図", "テロップ", "ナレーション", "BGM/SE", "訴求", ""].map((h) => (
-                    <th key={h} className="border p-2 text-left">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sb.cuts.map((c, i) => (
-                  <tr key={c.no} className="align-top">
-                    <td className="border p-2">{c.no}</td>
-                    <td className="border p-2 w-[500px]">
-                      {c.imageDataUrl ? (
-                        <div className="relative">
-                          <img
-                            src={c.imageDataUrl}
-                            className={
-                              "w-full rounded border-4 " +
-                              (c.imageSource === "upload"
-                                ? "border-sky-500"
-                                : c.imageSource === "ai"
-                                ? "border-violet-500"
-                                : "border-transparent")
-                            }
-                            alt={c.imageSource === "upload" ? "撮影素材" : c.imageSource === "ai" ? "AI生成画像" : "画像"}
-                          />
-                          {c.imageSource && (
-                            <span
-                              role="status"
-                              aria-label={c.imageSource === "upload" ? "撮影素材" : "AI生成"}
-                              className={
-                                "absolute top-1 left-1 text-xs font-bold px-1.5 py-0.5 rounded shadow " +
-                                (c.imageSource === "upload"
-                                  ? "bg-sky-500 text-white"
-                                  : "bg-violet-500 text-white")
-                              }
-                            >
-                              {c.imageSource === "upload" ? "📷 実写" : "🤖 AI"}
-                            </span>
-                          )}
-                          {/* 履歴切替ボタン */}
-                          {(c.aiImageDataUrl && c.imageSource !== "ai") || (c.uploadImageDataUrl && c.imageSource !== "upload") ? (
-                            <div className="absolute bottom-1 right-1 flex gap-1">
-                              {c.aiImageDataUrl && c.imageSource !== "ai" && (
-                                <button
-                                  onClick={() => revertSource(i, "ai")}
-                                  className="text-[10px] bg-violet-500/90 text-white rounded px-1.5 py-0.5"
-                                  title="AI生成画像に戻す"
-                                >
-                                  🤖に戻す
-                                </button>
-                              )}
-                              {c.uploadImageDataUrl && c.imageSource !== "upload" && (
-                                <button
-                                  onClick={() => revertSource(i, "upload")}
-                                  className="text-[10px] bg-sky-500/90 text-white rounded px-1.5 py-0.5"
-                                  title="撮影素材に戻す"
-                                >
-                                  📷に戻す
-                                </button>
-                              )}
-                            </div>
-                          ) : null}
-                        </div>
-                      ) : (
-                        <span className="text-neutral-400">未生成</span>
-                      )}
-                      {matchInfo[c.no] && (
-                        <div className="mt-1 text-[10px] text-amber-700 bg-amber-50 rounded px-1 py-0.5">
-                          一致度 {Math.round(matchInfo[c.no].confidence * 100)}%: {matchInfo[c.no].reason}
-                        </div>
-                      )}
-                      {pool.length > 0 && (
-                        <details className="mt-1 text-xs">
-                          <summary className="cursor-pointer text-amber-700">素材から選ぶ ({pool.length})</summary>
-                          <div className="flex gap-1 flex-wrap mt-1">
-                            {pool.map((p) => (
-                              <img
-                                key={p.id}
-                                src={p.thumbnailDataUrl}
-                                className="w-12 h-12 object-cover rounded border cursor-pointer hover:ring-2 hover:ring-amber-500"
-                                title={p.fileName}
-                                onClick={() => assignFromPool(i, p.id)}
-                              />
-                            ))}
-                          </div>
-                        </details>
-                      )}
-                      <textarea
-                        className="mt-1 w-full text-xs border rounded p-1"
-                        value={c.image}
-                        onChange={(e) => updateCut(i, "image", e.target.value)}
-                      />
-                    </td>
-                    <td className="border p-2 w-14">
-                      <input type="number" className="w-12 border rounded p-1" value={c.seconds}
-                        onChange={(e) => updateCut(i, "seconds", +e.target.value)} />
-                    </td>
-                    <td className="border p-2 w-14">{c.cumulative}</td>
-                    {(["scene", "shot", "camera", "telop", "narration", "bgm", "appeal"] as const).map((k) => (
-                      <td key={k} className="border p-2">
-                        <textarea
-                          className="w-48 border rounded p-1 text-xs min-h-[80px]"
-                          value={(c as any)[k] ?? ""}
-                          onChange={(e) => updateCut(i, k, e.target.value)}
+          {/* カット縦積みレイアウト */}
+          <div className="space-y-4">
+            {sb.cuts.map((c, i) => (
+              <article key={c.no} className="border-2 rounded-xl bg-white shadow-sm overflow-hidden">
+                {/* ヘッダバー */}
+                <header className="flex items-center gap-3 bg-neutral-100 px-4 py-2 border-b">
+                  <span className="text-lg font-bold">カット {c.no}</span>
+                  <label className="text-sm flex items-center gap-1">
+                    <span className="text-neutral-600">尺</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      className="w-16 border rounded px-1 py-0.5 text-right"
+                      value={c.seconds}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") return; // 入力途中の空は無視
+                        const n = parseInt(raw, 10);
+                        if (Number.isFinite(n) && n >= 0) updateCut(i, "seconds", n);
+                      }}
+                    />
+                    <span className="text-neutral-600">秒</span>
+                  </label>
+                  <span className="text-sm text-neutral-500">累計 {c.cumulative ?? "-"}秒</span>
+                  <span className="text-sm text-neutral-500">/ シーン: <span className="text-neutral-700">{c.scene || "—"}</span></span>
+                  <div className="ml-auto flex items-center gap-2">
+                    <button
+                      disabled={!!busy}
+                      onClick={() => generateImages([i])}
+                      className="text-xs bg-violet-600 hover:bg-violet-700 text-white rounded px-2 py-1 disabled:opacity-50"
+                      title="このカットだけAI画像を再生成"
+                    >
+                      🤖 再生成
+                    </button>
+                    <button
+                      disabled={!!busy}
+                      onClick={() => removeCut(i)}
+                      className="text-xs bg-neutral-300 hover:bg-red-500 hover:text-white text-neutral-700 rounded px-2 py-1 disabled:opacity-50"
+                      title="このカットを削除"
+                    >
+                      削除
+                    </button>
+                  </div>
+                </header>
+
+                <div className="grid grid-cols-1 lg:grid-cols-[640px_1fr] gap-4 p-4">
+                  {/* 画像エリア */}
+                  <div>
+                    {c.imageDataUrl ? (
+                      <div className="relative">
+                        <img
+                          src={c.imageDataUrl}
+                          className={
+                            "w-full rounded border-4 " +
+                            (c.imageSource === "upload"
+                              ? "border-sky-500"
+                              : c.imageSource === "ai"
+                              ? "border-violet-500"
+                              : "border-transparent")
+                          }
+                          alt={c.imageSource === "upload" ? "撮影素材" : c.imageSource === "ai" ? "AI生成画像" : "画像"}
                         />
-                      </td>
-                    ))}
-                    <td className="border p-2">
-                      <button
-                        disabled={!!busy}
-                        onClick={() => generateImages([i])}
-                        className="text-xs bg-neutral-800 text-white rounded px-2 py-1 disabled:opacity-50"
-                      >
-                        再生成
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                        {c.imageSource && (
+                          <span
+                            role="status"
+                            aria-label={c.imageSource === "upload" ? "撮影素材" : "AI生成"}
+                            className={
+                              "absolute top-2 left-2 text-sm font-bold px-2 py-0.5 rounded shadow " +
+                              (c.imageSource === "upload"
+                                ? "bg-sky-500 text-white"
+                                : "bg-violet-500 text-white")
+                            }
+                          >
+                            {c.imageSource === "upload" ? "📷 実写" : "🤖 AI"}
+                          </span>
+                        )}
+                        {((c.aiImageDataUrl && c.imageSource !== "ai") || (c.uploadImageDataUrl && c.imageSource !== "upload")) && (
+                          <div className="absolute bottom-2 right-2 flex gap-1">
+                            {c.aiImageDataUrl && c.imageSource !== "ai" && (
+                              <button
+                                onClick={() => revertSource(i, "ai")}
+                                className="text-xs bg-violet-500/90 hover:bg-violet-600 text-white rounded px-2 py-1"
+                              >
+                                🤖に戻す
+                              </button>
+                            )}
+                            {c.uploadImageDataUrl && c.imageSource !== "upload" && (
+                              <button
+                                onClick={() => revertSource(i, "upload")}
+                                className="text-xs bg-sky-500/90 hover:bg-sky-600 text-white rounded px-2 py-1"
+                              >
+                                📷に戻す
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="w-full aspect-video bg-neutral-100 rounded flex items-center justify-center text-neutral-400 border-2 border-dashed">
+                        画像なし
+                      </div>
+                    )}
+                    {matchInfo[c.no] && (
+                      <div className="mt-2 text-xs text-amber-700 bg-amber-50 rounded px-2 py-1 border border-amber-200">
+                        一致度 {Math.round(matchInfo[c.no].confidence * 100)}%: {matchInfo[c.no].reason}
+                      </div>
+                    )}
+                    {pool.length > 0 && (
+                      <details className="mt-2 text-xs">
+                        <summary className="cursor-pointer text-amber-700 font-medium">📁 素材プールから選ぶ ({pool.length}枚)</summary>
+                        <div className="flex gap-2 flex-wrap mt-2 max-h-40 overflow-y-auto">
+                          {pool.map((p) => (
+                            <img
+                              key={p.id}
+                              src={p.thumbnailDataUrl}
+                              className="w-16 h-16 object-cover rounded border cursor-pointer hover:ring-2 hover:ring-amber-500"
+                              title={p.fileName}
+                              onClick={() => assignFromPool(i, p.id)}
+                            />
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                    <label className="block mt-2">
+                      <span className="text-xs font-medium text-neutral-600">画の説明（AI画像生成のプロンプト）</span>
+                      <AutoTextarea
+                        className="w-full text-sm border rounded p-2 mt-1"
+                        value={c.image}
+                        onChange={(v) => updateCut(i, "image", v)}
+                      />
+                    </label>
+                  </div>
+
+                  {/* テキスト編集グリッド */}
+                  <div className="grid grid-cols-2 gap-3 content-start">
+                    <Field label="シーン" value={c.scene} onChange={(v) => updateCut(i, "scene", v)} />
+                    <Field label="映像（撮影素材の指定）" value={c.shot} onChange={(v) => updateCut(i, "shot", v)} />
+                    <Field label="構図・カメラワーク" value={c.camera} onChange={(v) => updateCut(i, "camera", v)} />
+                    <Field label="テロップ" value={c.telop} onChange={(v) => updateCut(i, "telop", v)} />
+                    <Field label="ナレーション" value={c.narration} onChange={(v) => updateCut(i, "narration", v)} fullWidth />
+                    <Field label="BGM・効果音" value={c.bgm} onChange={(v) => updateCut(i, "bgm", v)} />
+                    <Field label="訴求ポイント" value={c.appeal} onChange={(v) => updateCut(i, "appeal", v)} />
+                  </div>
+                </div>
+              </article>
+            ))}
+
+            {/* カット追加ボタン */}
+            <button
+              disabled={!!busy}
+              onClick={addCut}
+              className="w-full py-3 border-2 border-dashed border-neutral-300 hover:border-neutral-500 hover:bg-neutral-50 text-neutral-500 rounded-xl text-sm disabled:opacity-50"
+            >
+              ＋ カットを追加
+            </button>
           </div>
         </section>
       )}
