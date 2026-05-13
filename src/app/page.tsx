@@ -84,6 +84,7 @@ export default function Page() {
   const [cutCount, setCutCount] = useState<number | "">(""); // 空ならAIが自動決定
   const [subjectHint, setSubjectHint] = useState(""); // 主役の属性（性別・年代・服装等）
   const [style, setStyle] = useState<Style>("photo");
+  const [allowText, setAllowText] = useState(false); // 画像内に文字を入れるか
   const [sb, setSb] = useState<Storyboard | null>(null);
   const [busy, setBusy] = useState<string>("");
   const [sheetUrl, setSheetUrl] = useState<string>("");
@@ -193,6 +194,7 @@ export default function Page() {
       return;
     }
     const errs: string[] = [];
+    let successCount = 0;
     try {
       // 1枚ずつリクエスト（Vercel 4.5MB レスポンス上限回避）
       for (let k = 0; k < targets.length; k++) {
@@ -205,7 +207,13 @@ export default function Page() {
           const r = await fetch("/api/images", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ prompts: [prompt], style, ...(hint ? { subjectHint: hint } : {}) }),
+            cache: "no-store",
+            body: JSON.stringify({
+              prompts: [prompt],
+              style,
+              allowText,
+              ...(hint ? { subjectHint: hint } : {}),
+            }),
           });
           if (!r.ok) {
             errs.push(`カット${c.no}: HTTP ${r.status}: ${(await r.text()) || "(空)"}`);
@@ -225,8 +233,12 @@ export default function Page() {
               };
               return { ...prev, cuts };
             });
+            successCount++;
           } else if (res?.error) {
             errs.push(`カット${c.no}: ${res.error}`);
+          } else {
+            // Geminiが画像を返さなかった（プロンプトが空・不適切・安全フィルタ等）
+            errs.push(`カット${c.no}: 画像が返ってきませんでした。プロンプトを確認してください（「画の説明」欄に内容があるか）`);
           }
         } catch (e: any) {
           errs.push(`カット${c.no}: ${e.message}`);
@@ -234,7 +246,13 @@ export default function Page() {
       }
       if (errs.length) alert("画像生成エラー:\n" + errs.join("\n"));
     } finally {
-      setBusy("");
+      // 個別再生成の成功時は1.5秒だけ完了メッセージを残す
+      if (!isBulk && successCount > 0 && errs.length === 0) {
+        setBusy(`✓ カット${sb.cuts[targets[0]].no}を再生成しました`);
+        setTimeout(() => setBusy(""), 1500);
+      } else {
+        setBusy("");
+      }
     }
   }
 
@@ -606,6 +624,15 @@ export default function Page() {
               <option value="anime">アニメ調</option>
               <option value="rough">ラフスケッチ</option>
             </select>
+          </label>
+          <label className="flex items-center gap-2 self-end pb-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={allowText}
+              onChange={(e) => setAllowText(e.target.checked)}
+              className="w-4 h-4"
+            />
+            <span className="text-sm">画像内に文字OK <span className="text-xs text-neutral-500">(デフォルトは禁止)</span></span>
           </label>
           <button
             disabled={!!busy}

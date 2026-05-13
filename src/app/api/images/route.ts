@@ -9,6 +9,7 @@ const Body = z.object({
   prompts: z.array(z.string()).min(1).max(40),
   style: z.enum(["photo", "anime", "rough"]).default("photo"),
   subjectHint: z.string().trim().max(200).optional(), // 主役属性 — 人物が登場するカットのみ注入
+  allowText: z.boolean().optional().default(false),    // 画像内に文字を許可するか
 });
 
 const STYLE_SUFFIX: Record<string, string> = {
@@ -16,6 +17,10 @@ const STYLE_SUFFIX: Record<string, string> = {
   anime: "Modern anime illustration, 16:9, soft cel shading, clean lineart.",
   rough: "Rough storyboard sketch, pencil on paper, monochrome, 16:9, loose lines.",
 };
+
+// 画像内の文字（特に日本語のテロップ・看板・ロゴ）を強く禁止
+const NO_TEXT_CLAUSE =
+  "STRICT RULE: The image MUST NOT contain any text, letters, words, captions, subtitles, signs, banners, posters, billboards, logos, brand names, or any Japanese/English characters. Plain backgrounds and signage must be blank. If a sign or screen is visible, leave it empty.";
 
 // 日本語の主役ヒントを英語の被写体指示に変換
 function buildSubjectClause(hint?: string): string {
@@ -41,15 +46,18 @@ function mentionsPerson(p: string): boolean {
 }
 
 export async function POST(req: NextRequest) {
-  const { prompts, style, subjectHint } = Body.parse(await req.json());
+  const { prompts, style, subjectHint, allowText } = Body.parse(await req.json());
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const subjectClause = buildSubjectClause(subjectHint);
+  const textClause = allowText ? "" : NO_TEXT_CLAUSE;
 
   const results = await Promise.all(
     prompts.map(async (p) => {
       try {
         const includeSubject = subjectClause && mentionsPerson(p);
-        const fullPrompt = [includeSubject ? subjectClause : "", p, STYLE_SUFFIX[style]].filter(Boolean).join("\n\n");
+        const fullPrompt = [includeSubject ? subjectClause : "", p, STYLE_SUFFIX[style], textClause]
+          .filter(Boolean)
+          .join("\n\n");
         const res = await ai.models.generateContent({
           model: "gemini-2.5-flash-image",
           contents: [{ role: "user", parts: [{ text: fullPrompt }] }],
