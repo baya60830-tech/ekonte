@@ -58,6 +58,24 @@ function Field({
   );
 }
 
+// カード間のホバー挿入ライン
+function InsertLine({ onInsert, disabled }: { onInsert: () => void; disabled?: boolean }) {
+  return (
+    <div className="group relative h-3 flex items-center justify-center my-1">
+      <div className="absolute inset-x-0 h-px bg-transparent group-hover:bg-violet-300 transition-colors" />
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={onInsert}
+        className="opacity-0 group-hover:opacity-100 transition-opacity bg-violet-600 hover:bg-violet-700 text-white rounded-full px-3 py-1 text-xs font-bold shadow disabled:opacity-30"
+        aria-label="ここにカットを挿入"
+      >
+        ＋ ここに挿入
+      </button>
+    </div>
+  );
+}
+
 function recomputeCumulative(cuts: Cut[]): Cut[] {
   let acc = 0;
   return cuts.map((c) => {
@@ -341,11 +359,9 @@ export default function Page() {
     });
   }
 
-  function addCut() {
-    if (!sb) return;
-    const nextNo = sb.cuts.length + 1;
-    const newCut: Cut = {
-      no: nextNo,
+  function blankCut(no: number): Cut {
+    return {
+      no,
       image: "",
       seconds: 5,
       scene: "",
@@ -356,7 +372,50 @@ export default function Page() {
       bgm: "",
       appeal: "",
     };
-    setSb({ ...sb, cuts: recomputeCumulative([...sb.cuts, newCut]) });
+  }
+
+  // 任意位置にカット挿入。insertAt=0なら先頭、=cuts.lengthなら末尾。
+  function insertCut(insertAt: number) {
+    if (!sb) return;
+    const cuts = sb.cuts.slice();
+    cuts.splice(insertAt, 0, blankCut(0));
+    const renumbered = cuts.map((c, idx) => ({ ...c, no: idx + 1 }));
+    setSb({ ...sb, cuts: recomputeCumulative(renumbered) });
+    // matchInfo の番号付け直し（insertAt 以降は +1 シフト）
+    setMatchInfo((prev) => {
+      const next: typeof prev = {};
+      sb.cuts.forEach((c, idx) => {
+        if (!prev[c.no]) return;
+        const newIdx = idx < insertAt ? idx : idx + 1;
+        next[newIdx + 1] = prev[c.no];
+      });
+      return next;
+    });
+  }
+
+  function addCut() {
+    if (!sb) return;
+    insertCut(sb.cuts.length);
+  }
+
+  // 既存カットを複製。テキスト・尺は引き継ぎ、画像も引き継ぐ。
+  function duplicateCut(i: number) {
+    if (!sb) return;
+    const src = sb.cuts[i];
+    const cuts = sb.cuts.slice();
+    cuts.splice(i + 1, 0, { ...src, no: 0 });
+    const renumbered = cuts.map((c, idx) => ({ ...c, no: idx + 1 }));
+    setSb({ ...sb, cuts: recomputeCumulative(renumbered) });
+    setMatchInfo((prev) => {
+      const next: typeof prev = {};
+      sb.cuts.forEach((c, idx) => {
+        if (!prev[c.no]) return;
+        const newIdx = idx <= i ? idx : idx + 1;
+        next[newIdx + 1] = prev[c.no];
+      });
+      // 複製先は元のマッチ情報を引き継がない（実態は同じ画像だが別カット扱い）
+      return next;
+    });
   }
 
   async function handleUpload(files: FileList | null) {
@@ -740,9 +799,12 @@ export default function Page() {
           </div>
 
           {/* カット縦積みレイアウト */}
-          <div className="space-y-4">
+          <div className="space-y-1">
+            {/* 先頭への挿入ライン */}
+            <InsertLine onInsert={() => insertCut(0)} disabled={!!busy} />
             {sb.cuts.map((c, i) => (
-              <article key={c.no} className="border-2 rounded-xl bg-white shadow-sm overflow-hidden">
+              <div key={c.no}>
+              <article className="border-2 rounded-xl bg-white shadow-sm overflow-hidden">
                 {/* ヘッダバー */}
                 <header className="flex items-center gap-3 bg-neutral-100 px-4 py-2 border-b">
                   <span className="text-lg font-bold">カット {c.no}</span>
@@ -773,6 +835,14 @@ export default function Page() {
                       title="このカットだけAI画像を再生成"
                     >
                       🤖 再生成
+                    </button>
+                    <button
+                      disabled={!!busy}
+                      onClick={() => duplicateCut(i)}
+                      className="text-xs bg-neutral-200 hover:bg-neutral-300 text-neutral-700 rounded px-2 py-1 disabled:opacity-50"
+                      title="このカットを複製して下に追加"
+                    >
+                      📑 複製
                     </button>
                     <button
                       disabled={!!busy}
@@ -885,15 +955,17 @@ export default function Page() {
                   </div>
                 </div>
               </article>
+              {/* 次のカットの前に挿入できるライン */}
+              <InsertLine onInsert={() => insertCut(i + 1)} disabled={!!busy} />
+              </div>
             ))}
-
-            {/* カット追加ボタン */}
+            {/* 末尾の追加（ホバー無しで常時見える） */}
             <button
               disabled={!!busy}
               onClick={addCut}
-              className="w-full py-3 border-2 border-dashed border-neutral-300 hover:border-neutral-500 hover:bg-neutral-50 text-neutral-500 rounded-xl text-sm disabled:opacity-50"
+              className="mt-3 w-full py-3 border-2 border-dashed border-neutral-300 hover:border-neutral-500 hover:bg-neutral-50 text-neutral-500 rounded-xl text-sm disabled:opacity-50"
             >
-              ＋ カットを追加
+              ＋ 末尾にカットを追加
             </button>
           </div>
         </section>
