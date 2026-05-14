@@ -3,6 +3,23 @@
 import { useEffect, useRef, useState } from "react";
 import type { Storyboard, Cut } from "@/lib/types";
 import { fileToOriginalDataUrl, makeThumbnail } from "@/lib/image-utils";
+import {
+  DndContext,
+  PointerSensor,
+  KeyboardSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 // 自動高さ調整 textarea
 function AutoTextarea({
@@ -58,6 +75,37 @@ function Field({
   );
 }
 
+// dnd-kit Sortable ラッパー：ハンドル限定ドラッグ
+function SortableCutWrapper({
+  id,
+  children,
+}: {
+  id: string;
+  children: (handleProps: {
+    dragRef: (el: HTMLElement | null) => void;
+    listeners: any;
+    attributes: any;
+    isDragging: boolean;
+  }) => React.ReactNode;
+}) {
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+  return (
+    <div ref={setNodeRef} style={style}>
+      {children({
+        dragRef: () => {},
+        listeners,
+        attributes,
+        isDragging,
+      })}
+    </div>
+  );
+}
+
 // カード間のホバー挿入ライン
 function InsertLine({ onInsert, disabled }: { onInsert: () => void; disabled?: boolean }) {
   return (
@@ -84,6 +132,17 @@ function recomputeCumulative(cuts: Cut[]): Cut[] {
   });
 }
 
+// 安定ID生成（並び替え時にReact key/dnd-kit IDとして使う）
+function newId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `cut_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// _id が無いカットに ID を付与
+function ensureIds(cuts: Cut[]): Cut[] {
+  return cuts.map((c) => (c._id ? c : { ...c, _id: newId() }));
+}
+
 type Style = "photo" | "anime" | "rough";
 type Mode = "ai" | "import";
 
@@ -104,13 +163,30 @@ export default function Page() {
   const [style, setStyle] = useState<Style>("photo");
   const [allowText, setAllowText] = useState(false); // 画像内に文字を入れるか
   const [sb, setSb] = useState<Storyboard | null>(null);
+  // sb のカットに _id が無ければ自動付与（安定ID）
+  useEffect(() => {
+    if (!sb) return;
+    if (sb.cuts.some((c) => !c._id)) {
+      setSb({ ...sb, cuts: ensureIds(sb.cuts) });
+    }
+  }, [sb]);
   const [busy, setBusy] = useState<string>("");
   const [sheetUrl, setSheetUrl] = useState<string>("");
   const [pool, setPool] = useState<UploadedImage[]>([]);
   const [matchInfo, setMatchInfo] = useState<Record<number, { reason: string; confidence: number }>>({});
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
   const [mode, setMode] = useState<Mode>("ai");
   const [importUrl, setImportUrl] = useState("");
-  const [importInfo, setImportInfo] = useState<{ headers: string[]; mapping: Record<string, number>; usedFallback: boolean } | null>(null);
+  const [importInfo, setImportInfo] = useState<{
+    headers: string[];
+    mapping: Record<string, number>;
+    usedFallback: boolean;
+    warnings?: string[];
+    imageImport?: { attempted: number; succeeded: number };
+  } | null>(null);
 
   async function importFromSheet() {
     if (!importUrl.trim()) return;
@@ -157,7 +233,13 @@ export default function Page() {
         cuts,
       });
       setMatchInfo({});
-      setImportInfo({ headers: data.headers ?? [], mapping: data.mapping ?? {}, usedFallback: !!data.usedFallback });
+      setImportInfo({
+        headers: data.headers ?? [],
+        mapping: data.mapping ?? {},
+        usedFallback: !!data.usedFallback,
+        warnings: data.warnings ?? [],
+        imageImport: data.imageImport,
+      });
       setSheetUrl("");
     } catch (e: any) {
       alert(e.message);
@@ -278,10 +360,10 @@ export default function Page() {
     if (!sb) return;
     setBusy("Googleスプシに出力中…");
     try {
-      // 1) スプシ作成（画像系フィールドはすべて剥がしてテキストだけ送る）
+      // 1) スプシ作成（画像系フィールド + クライアント内部ID を剥がしてテキストだけ送る）
       const sbNoImg = {
         ...sb,
-        cuts: sb.cuts.map(({ imageDataUrl: _a, aiImageDataUrl: _b, uploadImageDataUrl: _c, ...rest }) => rest),
+        cuts: sb.cuts.map(({ imageDataUrl: _a, aiImageDataUrl: _b, uploadImageDataUrl: _c, _id: _d, ...rest }) => rest),
       };
       const r = await fetch("/api/sheet", {
         method: "POST",
@@ -361,6 +443,7 @@ export default function Page() {
 
   function blankCut(no: number): Cut {
     return {
+      _id: newId(),
       no,
       image: "",
       seconds: 5,
@@ -398,12 +481,31 @@ export default function Page() {
     insertCut(sb.cuts.length);
   }
 
+  // ドラッグ&ドロップで並び替え
+  function moveCut(fromIdx: number, toIdx: number) {
+    if (!sb) return;
+    if (fromIdx === toIdx) return;
+    const oldCuts = sb.cuts;
+    const moved = arrayMove(oldCuts, fromIdx, toIdx);
+    const renumbered = moved.map((c, idx) => ({ ...c, no: idx + 1 }));
+    setSb({ ...sb, cuts: recomputeCumulative(renumbered) });
+    // matchInfo を新インデックスに再マッピング
+    setMatchInfo((prev) => {
+      const next: typeof prev = {};
+      moved.forEach((c, newIdx) => {
+        const oldEntry = prev[c.no]; // c.no はまだ旧番号
+        if (oldEntry) next[newIdx + 1] = oldEntry;
+      });
+      return next;
+    });
+  }
+
   // 既存カットを複製。テキスト・尺は引き継ぎ、画像も引き継ぐ。
   function duplicateCut(i: number) {
     if (!sb) return;
     const src = sb.cuts[i];
     const cuts = sb.cuts.slice();
-    cuts.splice(i + 1, 0, { ...src, no: 0 });
+    cuts.splice(i + 1, 0, { ...src, _id: newId(), no: 0 });
     const renumbered = cuts.map((c, idx) => ({ ...c, no: idx + 1 }));
     setSb({ ...sb, cuts: recomputeCumulative(renumbered) });
     setMatchInfo((prev) => {
@@ -611,7 +713,19 @@ export default function Page() {
                 {importInfo.usedFallback && (
                   <span className="ml-2 text-amber-700">（公開リンク経由で読込）</span>
                 )}
+                {importInfo.imageImport && importInfo.imageImport.attempted > 0 && (
+                  <span className="ml-2 text-sky-700">
+                    画像取得 {importInfo.imageImport.succeeded}/{importInfo.imageImport.attempted}
+                  </span>
+                )}
               </div>
+              {importInfo.warnings && importInfo.warnings.length > 0 && (
+                <ul className="mt-1 list-disc list-inside text-amber-700">
+                  {importInfo.warnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              )}
               <details className="mt-1">
                 <summary className="cursor-pointer">マッピング詳細</summary>
                 <table className="mt-1 text-[11px]">
@@ -799,14 +913,38 @@ export default function Page() {
           </div>
 
           {/* カット縦積みレイアウト */}
+          <DndContext
+            sensors={dndSensors}
+            collisionDetection={closestCenter}
+            onDragEnd={(ev: DragEndEvent) => {
+              const { active, over } = ev;
+              if (!over || active.id === over.id) return;
+              const oldIdx = sb.cuts.findIndex((c) => c._id === active.id);
+              const newIdx = sb.cuts.findIndex((c) => c._id === over.id);
+              if (oldIdx < 0 || newIdx < 0) return;
+              moveCut(oldIdx, newIdx);
+            }}
+          >
+          <SortableContext items={sb.cuts.map((c) => c._id ?? "")} strategy={verticalListSortingStrategy}>
           <div className="space-y-1">
             {/* 先頭への挿入ライン */}
             <InsertLine onInsert={() => insertCut(0)} disabled={!!busy} />
             {sb.cuts.map((c, i) => (
-              <div key={c.no}>
-              <article className="border-2 rounded-xl bg-white shadow-sm overflow-hidden">
+              <SortableCutWrapper key={c._id} id={c._id ?? `tmp_${i}`}>
+                {({ listeners, attributes, isDragging }) => (
+                <div>
+              <article className={"border-2 rounded-xl bg-white shadow-sm overflow-hidden " + (isDragging ? "ring-2 ring-violet-400" : "")}>
                 {/* ヘッダバー */}
                 <header className="flex items-center gap-3 bg-neutral-100 px-4 py-2 border-b">
+                  <button
+                    {...attributes}
+                    {...listeners}
+                    className="cursor-grab active:cursor-grabbing text-neutral-400 hover:text-neutral-700 select-none touch-none"
+                    aria-label="カットをドラッグして並び替え"
+                    title="ドラッグで並び替え"
+                  >
+                    ⋮⋮
+                  </button>
                   <span className="text-lg font-bold">カット {c.no}</span>
                   <label className="text-sm flex items-center gap-1">
                     <span className="text-neutral-600">尺</span>
@@ -958,6 +1096,8 @@ export default function Page() {
               {/* 次のカットの前に挿入できるライン */}
               <InsertLine onInsert={() => insertCut(i + 1)} disabled={!!busy} />
               </div>
+                )}
+              </SortableCutWrapper>
             ))}
             {/* 末尾の追加（ホバー無しで常時見える） */}
             <button
@@ -968,6 +1108,8 @@ export default function Page() {
               ＋ 末尾にカットを追加
             </button>
           </div>
+          </SortableContext>
+          </DndContext>
         </section>
       )}
 

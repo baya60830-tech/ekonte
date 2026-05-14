@@ -14,6 +14,7 @@ export type Cut = {
   imageSource?: "ai" | "upload"; // 出所
   aiImageDataUrl?: string;       // 直近のAI生成画像（履歴）
   uploadImageDataUrl?: string;   // 直近のアップロード画像（履歴）
+  _id?: string;                  // クライアント側の安定ID（並び替え用、出力時に除去）
 };
 
 export type Storyboard = {
