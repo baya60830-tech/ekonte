@@ -161,6 +161,7 @@ export default function Page() {
   const [cutCount, setCutCount] = useState<number | "">(""); // 空ならAIが自動決定
   const [subjectHint, setSubjectHint] = useState(""); // 主役の属性（性別・年代・服装等）
   const [style, setStyle] = useState<Style>("photo");
+  const [quality, setQuality] = useState<"low" | "medium" | "high">("medium"); // gpt-image-2 画質
   const [allowText, setAllowText] = useState(false); // 画像内に文字を入れるか
   const [sb, setSb] = useState<Storyboard | null>(null);
   // sb のカットに _id が無ければ自動付与（安定ID）
@@ -311,6 +312,7 @@ export default function Page() {
             body: JSON.stringify({
               prompts: [prompt],
               style,
+              quality,
               allowText,
               ...(hint ? { subjectHint: hint } : {}),
             }),
@@ -796,6 +798,18 @@ export default function Page() {
               <option value="photo">実写</option>
               <option value="anime">アニメ調</option>
               <option value="rough">ラフスケッチ</option>
+            </select>
+          </label>
+          <label className="block">
+            <span className="text-sm font-medium">画質 <span className="text-xs text-neutral-500">(gpt-image-2)</span></span>
+            <select
+              className="mt-1 border rounded-lg p-2"
+              value={quality}
+              onChange={(e) => setQuality(e.target.value as "low" | "medium" | "high")}
+            >
+              <option value="low">下書き（約$0.006/枚）</option>
+              <option value="medium">標準（約$0.05/枚）</option>
+              <option value="high">高品質（約$0.21/枚）</option>
             </select>
           </label>
           <label className="flex items-center gap-2 self-end pb-2 cursor-pointer">
