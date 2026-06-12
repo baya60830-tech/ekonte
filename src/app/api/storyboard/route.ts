@@ -10,7 +10,11 @@ const Body = z.object({
   brief: z.string().min(1),
   totalSeconds: z.number().int().positive().default(60),
   cutCount: z.number().int().positive().optional(), // 未指定ならAIが決める
-  subjectHint: z.string().trim().max(200).optional(), // 主役の属性ヒント
+  subjectHint: z
+    .string()
+    .trim()
+    .transform((s) => s.slice(0, 500)) // 長すぎる場合は切り詰め（エラーにしない）
+    .optional(), // 主役の属性ヒント
 });
 
 const SYSTEM = `あなたは映像ディレクターです。日本語の企画概要から、指定された総尺・カット数で絵コンテのカット表を作成します。

@@ -762,8 +762,9 @@ export default function Page() {
           </span>
           <input
             type="text"
+            maxLength={500}
             className="mt-1 w-full border rounded-lg p-2"
-            placeholder="例: 30代女性、保育士、紺のエプロン、穏やかな笑顔"
+            placeholder="例: 30代女性、保育士、紺のエプロン、穏やかな笑顔（500文字まで）"
             value={subjectHint}
             onChange={(e) => setSubjectHint(e.target.value)}
           />

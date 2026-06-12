@@ -7,7 +7,11 @@ export const maxDuration = 300;
 const Body = z.object({
   prompts: z.array(z.string()).min(1).max(40),
   style: z.enum(["photo", "anime", "rough"]).default("photo"),
-  subjectHint: z.string().trim().max(200).optional(), // 主役属性 — 人物が登場するカットのみ注入
+  subjectHint: z
+    .string()
+    .trim()
+    .transform((s) => s.slice(0, 500)) // 長すぎる場合は切り詰め（エラーにしない）
+    .optional(), // 主役属性 — 人物が登場するカットのみ注入
   allowText: z.boolean().optional().default(false),    // 画像内に文字を許可するか
   quality: z.enum(["low", "medium", "high"]).default("medium"), // gpt-image-2 の画質
 });
@@ -88,7 +92,14 @@ async function generateOne(prompt: string, quality: "low" | "medium" | "high") {
 }
 
 export async function POST(req: NextRequest) {
-  const { prompts, style, subjectHint, allowText, quality } = Body.parse(await req.json());
+  const parsed = Body.safeParse(await req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "リクエストの形式が不正です: " + parsed.error.issues.map((i) => i.path.join(".") + " " + i.message).join(", ") },
+      { status: 400 }
+    );
+  }
+  const { prompts, style, subjectHint, allowText, quality } = parsed.data;
   if (!process.env.OPENAI_API_KEY) {
     return NextResponse.json(
       { results: prompts.map(() => ({ error: "OPENAI_API_KEY が未設定です。Vercelの環境変数に追加してください。" })) },
